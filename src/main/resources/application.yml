@@ -1,0 +1,82 @@
+spring:
+  application:
+    name: rag-assistant
+
+  # PostgreSQL - users + chat_history tables. No schema.sql needed -- Hibernate
+  # creates/updates both tables straight from the User and ChatHistory entities
+  # (that's what ddl-auto: update below does). Just make sure a database named
+  # "ragassistant" exists (createdb ragassistant) before starting the app.
+  #
+  # Defaults point at "suhani.mittal" (not "postgres") because Homebrew's
+  # Postgres only auto-creates a role matching your Mac username -- there is
+  # no separate "postgres" role on this machine unless you create one
+  # yourself. Password default assumes local trust auth (no real password
+  # required for localhost connections, which is Homebrew Postgres's usual
+  # default) -- if that's wrong for your setup, see the note below.
+  datasource:
+    url: jdbc:postgresql://localhost:5432/ragassistant
+    username: ${DB_USERNAME:suhani.mittal}
+    password: ${DB_PASSWORD:postgres}
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+    show-sql: false
+
+  servlet:
+    multipart:
+      # PDF uploads need a larger limit than Spring's 1MB default.
+      max-file-size: 20MB
+      max-request-size: 20MB
+
+# OCR configuration - path to the folder containing eng.traineddata
+ocr:
+  tessdata-path: tessdata
+  language: eng
+
+# JWT - reads from the JWT_SECRET environment variable if one is set (e.g. in
+# a real deployment); otherwise falls back to the placeholder value below so
+# local dev/demo runs work with zero setup. Before any real deployment,
+# actually set JWT_SECRET (e.g. export JWT_SECRET=$(openssl rand -base64 48))
+# so it's NOT this fallback value.
+# 86400000 ms = 24 hours, matches the cookie's maxAge in AuthController.
+jwt:
+  secret: ${JWT_SECRET:local-dev-only-placeholder-secret-do-not-use-in-production}
+  expiration-ms: 86400000
+
+app:
+  security:
+    # COOKIE_SECURE must become "true" once the app is served over HTTPS (a
+    # browser will not send/store a Secure cookie over plain HTTP, which is why
+    # this has to stay false for local http://localhost dev).
+    # No CORS setting needed anymore -- the frontend is now served by this same
+    # Spring Boot app (see src/main/resources/static), so every request is
+    # same-origin.
+    cookie-secure: ${COOKIE_SECURE:false}
+  # Where uploaded PDFs are saved on disk (relative to wherever the app is run
+  # from), organized as uploads/user-{id}/doc-{id}.pdf.
+  upload-dir: uploads
+
+# OpenAI - required for both turning text into vectors (embeddings) and
+# generating the actual chat answers. No fallback here on purpose: unlike
+# JWT_SECRET, there's no safe placeholder that lets embeddings/chat "just
+# work" -- you must set the real OPENAI_API_KEY env var before uploading a
+# document or asking a question (register/login/logout still work without it).
+openai:
+  api-key: ${OPENAI_API_KEY}
+  embedding-model: text-embedding-3-small
+  chat-model: gpt-4o-mini
+
+# Qdrant - the vector store. This is its own server process (like Postgres),
+# NOT something that runs inside this Spring Boot app just because it's a
+# dependency -- see QdrantClient, which talks to it over plain HTTP. Easiest
+# local setup: `docker run -p 6333:6333 qdrant/qdrant`, which is what these
+# defaults assume. All of a user's document chunks live in one collection,
+# separated from other users by a "userId" field on every stored point.
+qdrant:
+  host: ${QDRANT_HOST:localhost}
+  port: ${QDRANT_PORT:6333}
+  collection-name: document_chunks
