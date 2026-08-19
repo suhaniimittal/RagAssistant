@@ -1,19 +1,18 @@
-# Secrets -- never commit
-.env
+# Frontend
+rag-frontend/node_modules/
+rag-frontend/dist/
+rag-frontend/.env
+rag-frontend/.env.*
+!rag-frontend/.env.example
 
-# Maven build output
-target/
-
-# Uploaded user files (created at runtime, not part of the source)
-uploads/
+# Backend
+rag-assistant/.env
+rag-assistant/target/
+rag-assistant/.idea/
 
 # IDE
 .idea/
-*.iml
-out/
+.vscode/
 
 # OS
 .DS_Store
-
-# Logs
-*.log

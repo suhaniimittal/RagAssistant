@@ -1,0 +1,24 @@
+/* Global reset only -- NO app-specific colors/fonts/widths belong in this
+   file. Everything that actually styles DocuChat lives in App.css.
+   Previously this file had leftover boilerplate from whatever starter
+   template the project began from (a purple --accent theme, blog-style
+   h1/h2 sizing, a "counter" class, dark-mode overrides -- none of it ours),
+   including one rule that was quietly sabotaging every layout change made
+   in App.css: #root was pinned to width: 1126px, centered with
+   margin: 0 auto, and boxed in with a 1px border-inline. That's the actual
+   root cause of "the whole app renders as a small bordered box centered on
+   the page with huge blank margins on both sides" -- no amount of editing
+   .chat-page in App.css could ever fix that, because .chat-page was
+   rendering *inside* that fixed-width box the entire time. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+}

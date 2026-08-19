@@ -1,0 +1,854 @@
+* {
+  box-sizing: border-box;
+}
+
+/* Design tokens used by the Dashboard (sidebar + chat) below -- one place
+   to tune radius/color/spacing/shadow so the whole screen reads as one
+   consistent system instead of every rule picking its own numbers. */
+:root {
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+
+  --border-color: #e2e5ea;
+  --border-color-strong: #b9c1cd;
+
+  --surface: #ffffff;
+  --surface-subtle: #f6f7f9;
+  --surface-page: #eef0f4;
+  --sidebar-bg: linear-gradient(180deg, #e7edfb 0%, #dfe6f7 100%);
+
+  --text-primary: #14181f;
+  --text-secondary: #4b5563;
+  --text-tertiary: #74808f;
+
+  --accent: #2f5fd6;
+  --accent-hover: #2751bd;
+  --accent-subtle: #eef1fb;
+  --accent-border: #c9d7f7;
+
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-md: 0 8px 24px rgba(16, 24, 40, 0.07), 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: #f4f5f7;
+}
+
+.auth-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: linear-gradient(135deg, #e7ecfb 0%, #dde6fb 45%, #e9f0fb 100%);
+}
+
+.auth-form {
+  background: #ffffff;
+  border: 1px solid #e2e4e9;
+  border-top: 4px solid #2f5fd6;
+  border-radius: 16px;
+  padding: 44px 40px;
+  width: 100%;
+  max-width: 440px;
+  box-shadow: 0 24px 60px rgba(47, 95, 214, 0.14), 0 4px 12px rgba(16, 24, 40, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.auth-form h1 {
+  margin: 0 0 14px;
+  font-size: 27px;
+  color: #14181f;
+}
+
+.auth-form label {
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 12px;
+  color: #444;
+}
+
+.auth-form input {
+  padding: 12px 14px;
+  border: 1px solid #d0d3d9;
+  border-radius: 10px;
+  font-size: 14.5px;
+}
+
+.auth-form input:focus {
+  outline: none;
+  border-color: #2f5fd6;
+  box-shadow: 0 0 0 3px rgba(47, 95, 214, 0.12);
+}
+
+.auth-form button {
+  margin-top: 22px;
+  padding: 13px;
+  border: none;
+  border-radius: 10px;
+  background: #2f5fd6;
+  color: white;
+  font-weight: 600;
+  font-size: 15px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.1s ease;
+}
+
+.auth-form button:hover:not(:disabled) {
+  background: #2751bd;
+}
+
+.auth-form button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.auth-form button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.field-error {
+  color: #c0392b;
+  font-size: 12.5px;
+  margin: 2px 0 0;
+}
+
+.server-error {
+  color: #c0392b;
+  font-size: 13.5px;
+  margin-top: 10px;
+}
+
+.success-message {
+  color: #1a7f4e;
+  font-size: 13.5px;
+  margin-top: 10px;
+}
+
+.auth-switch {
+  margin-top: 16px;
+  font-size: 13.5px;
+  text-align: center;
+  color: #555;
+}
+
+.auth-checking {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #666;
+}
+
+/* ---------- Dashboard: document upload + chat ---------- */
+
+/* Full-viewport application shell -- sidebar and main workspace are
+   directly part of this layout (edge to edge, no outer padding/gap), not
+   cards floating on a visible page background. align-items defaults to
+   stretch, so both children fill the full 100vh height for free. */
+.chat-page {
+  display: flex;
+  height: 100vh;
+  width: 100%;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+/* A visibly tinted background (not near-white) is the main thing that
+   separates the sidebar from the chat workspace, plus a crisper border --
+   document cards and the upload control then sit on TOP of this tint as
+   white elements, which is what gives the sidebar actual depth/hierarchy
+   instead of everything being one flat shade of light gray. */
+.chat-sidebar {
+  width: clamp(320px, 24vw, 400px);
+  flex-shrink: 0;
+  height: 100%;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border-color-strong);
+  padding: 30px 26px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 22px;
+}
+
+.brand-icon {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #2f5fd6, #5b8def);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.brand-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.brand-name {
+  font-size: 16.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+/* A plain row with a divider underneath reads as "part of the same
+   grouped block" -- a separate boxed-in-a-box treatment here would
+   compete with the document cards below for attention instead of just
+   quietly identifying the user. */
+.chat-sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding-bottom: 18px;
+  margin-bottom: 22px;
+  border-bottom: 1px solid var(--border-color-strong);
+}
+
+.user-avatar {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  font-weight: 700;
+  font-size: 13.5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.user-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.chat-user {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Secondary, not hidden -- readable at rest via --text-secondary (not the
+   paler tertiary tone), and turns unmistakably red on hover/focus. Logging
+   out is rare, so it shouldn't be as loud as the document list, but it
+   still needs to be findable at a glance. */
+.logout-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.logout-button:hover,
+.logout-button:focus-visible {
+  color: #c0392b;
+}
+
+.sidebar-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* This label is the sidebar's main heading in practice -- the documents
+   section IS the sidebar's purpose -- so it gets a touch more weight and
+   contrast than a typical muted eyebrow label would. */
+.chat-sidebar h2 {
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 0 0 14px;
+  color: var(--text-secondary);
+}
+
+/* A white component sitting on the tinted sidebar (not blending into it),
+   with a real icon chip instead of a bare stroke icon -- this is meant to
+   look like a deliberate, substantial upload control, not an empty dashed
+   rectangle. Still a single comfortable row, not a huge centered block. */
+.upload-dropzone {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  padding: 14px 14px;
+  border: 1.75px dashed var(--border-color-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--accent);
+  cursor: pointer;
+  margin-bottom: 18px;
+  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.upload-dropzone:hover {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  box-shadow: var(--shadow-sm);
+}
+
+.upload-dropzone:focus-within {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.upload-dropzone-busy {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.upload-icon {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.upload-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.upload-title {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--accent);
+}
+
+.upload-hint {
+  display: block;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.document-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+/* Each document is a real white card on the tinted sidebar background --
+   a visible border (not transparent-until-hover) gives every item clear
+   separation from its neighbors up front, and hover adds a border-color
+   shift + a small shadow lift so the interactivity itself feels tangible. */
+.document-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border: 1px solid var(--border-color);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.document-item:hover {
+  border-color: var(--border-color-strong);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+.document-icon {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-border);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.document-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Name on its own line, status directly underneath it -- this is what
+   visually ties the badge to ITS document instead of the badge reading
+   as a separate, oddly-placed element off to the side. */
+.document-info {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.document-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.document-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 700;
+  width: fit-content;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.status-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.document-status-ready {
+  background: #dcf5e6;
+  color: #12784a;
+}
+
+.document-status-processing {
+  background: #fde8cc;
+  color: #9a5b0a;
+}
+
+.document-status-failed {
+  background: #fbe0dd;
+  color: #b3261e;
+}
+
+.document-error {
+  color: #b3261e;
+  font-size: 11px;
+}
+
+/* Sits at the end of the document row (flex, alongside .document-icon and
+   .document-info) -- muted at rest so the row isn't dominated by a
+   destructive action, turns unmistakably red on hover/focus the same way
+   .logout-button does. */
+.document-delete-button {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.document-delete-button:hover:not(:disabled),
+.document-delete-button:focus-visible:not(:disabled) {
+  color: #c0392b;
+  background: #fbe0dd;
+}
+
+.document-delete-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.document-empty {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 6px 2px;
+}
+
+/* Main workspace fills all remaining space -- header, messages, and
+   composer are sections of this one full-height column, divided by
+   hairlines only. No border/radius/shadow/margin around the whole thing;
+   it IS the page, not a card sitting inside it. */
+.chat-main {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--surface);
+}
+
+.chat-header {
+  flex-shrink: 0;
+  padding: 20px 36px;
+  background: linear-gradient(180deg, #f5f8ff 0%, #ffffff 100%);
+  border-bottom: 1px solid var(--border-color);
+  border-top: 3px solid var(--accent);
+}
+
+.chat-header h1 {
+  margin: 0 0 3px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.chat-header p {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-tertiary);
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.chat-empty {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  max-width: 320px;
+  text-align: center;
+}
+
+.chat-empty-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-empty-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.chat-bubble {
+  max-width: min(700px, 75%);
+  padding: 13px 18px;
+  border-radius: var(--radius-md);
+  font-size: 14.5px;
+  line-height: 1.55;
+}
+
+.chat-bubble-text {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* Long structured answers (multi-section comparisons, etc.) get their own
+   contained scrollbar instead of growing the bubble taller and pushing the
+   Sources panel further down the page -- only the answer text scrolls, the
+   Sources panel underneath always stays fully visible right after it. */
+.chat-bubble-assistant .chat-bubble-text {
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+
+.chat-bubble-user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: white;
+  border-bottom-right-radius: 4px;
+}
+
+.chat-bubble-assistant {
+  align-self: flex-start;
+  background: #f3f6fd;
+  border: 1px solid #dce4f7;
+  color: var(--text-primary);
+  border-bottom-left-radius: 4px;
+}
+
+/* ---------- Sources: shown under an assistant answer ---------- */
+/* Grouped by FILE first (one row per PDF, with a "N pages" count), then
+   expandable per file into its individual matched pages -- replaces the
+   earlier flat "4 visible + N more" list, which didn't scale well and
+   didn't group multiple pages from the same file together. */
+
+.chat-sources {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.chat-sources-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-tertiary);
+}
+
+.chat-sources-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.chat-sources-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-source-file-group {
+  background: var(--surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+/* The clickable file row (icon + filename + "N pages" pill + chevron) -- a
+   real <button> for accessibility/keyboard support, styled as a plain row. */
+.chat-source-file-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.chat-source-file-icon {
+  flex-shrink: 0;
+  display: flex;
+  color: #d33b3b; /* red PDF-style icon */
+}
+
+.chat-source-file {
+  min-width: 0;
+  flex: 1;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-source-page-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* Base chevron points right (collapsed); rotates to point down/up depending
+   on state -- see the two variants below. */
+.chat-source-chevron {
+  flex-shrink: 0;
+  display: flex;
+  color: var(--text-tertiary);
+  transition: transform 0.15s ease;
+  transform: rotate(90deg); /* collapsed: pointing down */
+}
+
+.chat-source-chevron-expanded {
+  transform: rotate(-90deg); /* expanded: pointing up */
+}
+
+/* The list of matched pages for one expanded file. */
+.chat-source-page-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.chat-source-page-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.chat-source-page-badge {
+  flex-shrink: 0;
+  min-width: 24px;
+  text-align: center;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.chat-source-page-text-wrap {
+  flex: 1;
+  min-width: 0;
+  border-left: 3px solid var(--accent-border);
+  padding-left: 10px;
+}
+
+.chat-source-page-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+/* Bolded key facts (money amounts, durations, percentages) -- used both
+   inside a Source chunk AND inside the main answer bubble itself (same
+   highlightKeyFacts() call in Dashboard.jsx for both). A pattern-based
+   guess at what's worth drawing the eye to, not a guarantee that it's the
+   exact fact the answer actually cited. */
+.chat-source-highlight {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.chat-source-page-chevron {
+  flex-shrink: 0;
+  margin-top: 2px;
+  background: none;
+  border: none;
+  padding: 2px;
+  cursor: pointer;
+}
+
+.chat-input-row {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 20px 36px;
+  border-top: 1px solid var(--border-color);
+}
+
+/* Input and button share one continuous pill silhouette (rounded on
+   their outer corners only, no gap or seam between them) instead of two
+   separate pill-shaped elements sitting side by side -- that's what
+   makes this read as one composer rather than two unrelated controls. */
+.chat-input-row input {
+  flex: 1;
+  height: 46px;
+  padding: 0 20px;
+  border: 1px solid var(--border-color-strong);
+  border-right: none;
+  border-radius: 999px 0 0 999px;
+  font-size: 14px;
+  background: var(--surface-subtle);
+  color: var(--text-primary);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.chat-input-row input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.chat-input-row input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface);
+}
+
+.chat-input-row button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 46px;
+  padding: 0 26px;
+  border: none;
+  border-radius: 0 999px 999px 0;
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.chat-input-row button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.chat-input-row button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chat-input-row button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
