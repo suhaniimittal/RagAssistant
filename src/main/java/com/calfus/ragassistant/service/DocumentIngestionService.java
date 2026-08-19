@@ -56,7 +56,7 @@ public class DocumentIngestionService {
             UserRepository userRepository,
             EmbeddingModel embeddingModel,
             QdrantClient qdrantClient,
-            @Value("${app.upload-dir}") String uploadDir) {    // spring injects - uploadDir = "uploads"(upload-dir in yml)
+            @Value("${app.upload-dir}") String uploadDir) {
         this.pdfIngestionService = pdfIngestionService;
         this.documentRepository = documentRepository;
         this.userRepository = userRepository;
@@ -85,7 +85,7 @@ public class DocumentIngestionService {
 
         File savedFile;
         try {
-            savedFile = saveToDisk(userId, document.getId(), file);   //The original PDF is saved physically on the server.
+            savedFile = saveToDisk(userId, document.getId(), file);
             document.setStoredPath(savedFile.getPath());
         } catch (IOException e) {
             document.setStatus(DocumentStatus.FAILED);
@@ -94,16 +94,17 @@ public class DocumentIngestionService {
         }
 
         try {
-
-            List<String> cleanedPages = pdfIngestionService.parseAndCleanPerPage(savedFile);   //each string represents one page.
+            // Kept per-page (not merged into one string) so every chunk can be
+            // tagged with the page it actually came from, for citations.
+            List<String> cleanedPages = pdfIngestionService.parseAndCleanPerPage(savedFile);
 
             DocumentSplitter splitter = DocumentSplitters.recursive(MAX_CHUNK_TOKENS, CHUNK_OVERLAP_TOKENS);
 
             // Split each page separately, remembering which page every
             // resulting segment came from (chunks never span two pages this
             // way -- a simple, reliable trade-off for accurate page citations).
-            List<TextSegment> segments = new ArrayList<>();                          // actual chunk text
-            List<Integer> segmentPageNumbers = new ArrayList<>();                    // which page that chunk came from
+            List<TextSegment> segments = new ArrayList<>();
+            List<Integer> segmentPageNumbers = new ArrayList<>();
             for (int pageIndex = 0; pageIndex < cleanedPages.size(); pageIndex++) {
                 String pageText = cleanedPages.get(pageIndex);
                 if (pageText.isBlank()) {
@@ -112,7 +113,7 @@ public class DocumentIngestionService {
                 // Fully-qualified on purpose -- this is LangChain4j's Document
                 // type, distinct from our own com.calfus.ragassistant.model.Document.
                 List<TextSegment> pageSegments =
-                        splitter.split(dev.langchain4j.data.document.Document.from(pageText));  //This takes the entire current page and splits it into smaller chunks.
+                        splitter.split(dev.langchain4j.data.document.Document.from(pageText));
                 for (TextSegment segment : pageSegments) {
                     segments.add(segment);
                     segmentPageNumbers.add(pageIndex + 1); // pages are 1-indexed for humans
@@ -125,7 +126,7 @@ public class DocumentIngestionService {
 
             List<Embedding> embeddings = embeddingModel.embedAll(segments).content();
 
-            List<QdrantPoint> points = new ArrayList<>();  // a qdrant point contains id,vector,payload So you'll create one point for every chunk.
+            List<QdrantPoint> points = new ArrayList<>();
             for (int i = 0; i < segments.size(); i++) {
                 Map<String, Object> payload = new HashMap<>();
                 payload.put("userId", userId);
@@ -144,7 +145,7 @@ public class DocumentIngestionService {
 
             document.setStatus(DocumentStatus.READY);
             document.setChunkCount(segments.size());
-        } catch (Exception e) {
+        } catch (Throwable e) {
             document.setStatus(DocumentStatus.FAILED);
             document.setErrorMessage(e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
         }
@@ -156,12 +157,30 @@ public class DocumentIngestionService {
         return documentRepository.findByUserIdOrderByUploadedAtDesc(userId);
     }
 
+    public void delete(UUID userId, UUID documentId) {
+        Document document = documentRepository.findByIdAndUserId(documentId, userId)
+                .orElseThrow(() -> new RagException(HttpStatus.NOT_FOUND, "Document not found"));
+
+        qdrantClient.deleteByDocumentId(documentId);
+
+        if (document.getStoredPath() != null) {
+            try {
+                Files.deleteIfExists(Path.of(document.getStoredPath()));
+            } catch (IOException e) {
+                // Not fatal -- a leftover file on disk is harmless clutter,
+                // not something worth failing the whole delete over.
+            }
+        }
+
+        documentRepository.delete(document);
+    }
+
     private File saveToDisk(UUID userId, UUID documentId, MultipartFile file) throws IOException {
         Path userDir = Path.of(uploadDir, "user-" + userId);
         Files.createDirectories(userDir);
-        Path target = userDir.resolve("doc-" + documentId + ".pdf");   // Creates the actual file path.
-        file.transferTo(target);   // This actually copies the uploaded PDF to disk.
-        return target.toFile();    // Returns the saved file (Converts the Path into a Java File object)
+        Path target = userDir.resolve("doc-" + documentId + ".pdf");
+        file.transferTo(target);
+        return target.toFile();
     }
 
     private List<Float> toFloatList(float[] vector) {

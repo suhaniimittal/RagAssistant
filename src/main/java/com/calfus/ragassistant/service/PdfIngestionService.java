@@ -18,81 +18,64 @@ import java.io.File;
 import java.io.IOException;
 import java.text.Normalizer;
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.regex.Pattern;
 
-/**
- * Step 1-3 of the ingestion pipeline: PDF parsing (with OCR fallback for
- * scanned pages and embedded images) followed by document cleaning.
- *
- * Design decisions this class implements (per the agreed architecture):
- *  - Pages are read in a loop internally (so we can detect/OCR images per
- *    page). Two output shapes are available: parseAndClean() merges every
- *    page into ONE string (kept for the original whole-document use case and
- *    its test), and parseAndCleanPerPage() keeps pages separate so callers
- *    that need to cite a page number (e.g. chunk -> source citation) can.
- *  - Per page: PDFTextStripper extracts the real text layer, AND every
- *    embedded image on that page is OCR'd separately and appended.
- *  - If a page's text layer is empty/near-empty, it's treated as a fully
- *    scanned page: the whole page is rendered as an image and OCR'd instead.
- *  - Boilerplate detection (repeated headers/footers) always looks at every
- *    page's lines together to know what "repeats", even in the per-page
- *    variant - only the removal step is applied per page there, so page
- *    boundaries survive cleaning.
- */
+
 @Service
 public class PdfIngestionService {
 
     private static final int MIN_REAL_TEXT_LENGTH = 20; // below this -> treat page as scanned
     private static final int RENDER_DPI = 200;
-    private static final int BOILERPLATE_MIN_REPEATS = 3; // line seen 3+ times -> likely header/footer
-    private static final int BOILERPLATE_MAX_LINE_LENGTH = 80; // only short lines are boilerplate candidates
+    private static final Pattern PAGE_FOOTER_PATTERN =
+            Pattern.compile("^\\s*page\\s+\\d+(\\s+of\\s+\\d+)?\\s*", Pattern.CASE_INSENSITIVE);
+
+    private static final double MIN_REAL_WORD_RATIO = 0.5;
+
+    // Above this fraction of tokens being bare numbers, a page reads as an
+    // index/table of contents (a run of section titles each followed by its
+    // own page number) rather than actual prose -- real paragraphs rarely
+    // contain more than the occasional number.
+    private static final double MAX_NUMBER_TOKEN_RATIO = 0.25;
 
     private final String tessdataPath;
     private final String ocrLanguage;
 
     public PdfIngestionService(
             @Value("${ocr.tessdata-path:tessdata}") String tessdataPath,
-            @Value("${ocr.language:eng}") String ocrLanguage) {
+            @Value("${ocr.language:eng}") String ocrLanguage,
+            @Value("${ocr.native-library-path:}") String nativeLibraryPath) {
         this.tessdataPath = tessdataPath;
         this.ocrLanguage = ocrLanguage;
+
+        if (nativeLibraryPath != null && !nativeLibraryPath.isBlank()) {
+            System.setProperty("jna.library.path", nativeLibraryPath);
+        }
     }
 
-    /**
-     * Full Step 1-3 entry point: parse the given PDF (with OCR fallback) and
-     * return the cleaned, whole-document text ready for chunking. Use this
-     * when you don't need to know which page a piece of text came from.
-     */
-    public String parseAndClean(File pdfFile) throws IOException, TesseractException {
-        String rawText = String.join("\n", parsePages(pdfFile));
-        return clean(rawText);
-    }
-
-    /**
-     * Same parsing + cleaning as parseAndClean(), but keeps pages separate
-     * instead of merging them - index 0 is page 1, index 1 is page 2, etc.
-     * Use this when downstream chunks need to cite a page number.
-     */
     public List<String> parseAndCleanPerPage(File pdfFile) throws IOException, TesseractException {
-        List<String> rawPages = parsePages(pdfFile);
-        Set<String> boilerplate = computeBoilerplateLines(rawPages);
+        List<ParsedPage> rawPages = parsePages(pdfFile);
 
         List<String> cleanedPages = new ArrayList<>(rawPages.size());
-        for (String rawPage : rawPages) {
-            cleanedPages.add(cleanSinglePage(rawPage, boilerplate));
+        for (ParsedPage rawPage : rawPages) {
+            String cleanedText = clean(rawPage.text());
+            if (rawPage.fromOcr() && looksLikeGarbledText(cleanedText)) {
+                cleanedText = "";
+            } else if (looksLikeTableOfContents(cleanedText)) {
+                cleanedText = "";
+            }
+            cleanedPages.add(cleanedText);
         }
         return cleanedPages;
     }
 
-    // ---------------------------------------------------------------------
-    // Parsing (text extraction + OCR)
-    // ---------------------------------------------------------------------
 
-    private List<String> parsePages(File pdfFile) throws IOException, TesseractException {
-        List<String> pages = new ArrayList<>();
+    private record ParsedPage(String text, boolean fromOcr) {
+    }
+
+    private List<ParsedPage> parsePages(File pdfFile) throws IOException, TesseractException {
+        List<ParsedPage> pages = new ArrayList<>();
 
         try (PDDocument document = Loader.loadPDF(pdfFile)) {
             PDFTextStripper stripper = new PDFTextStripper();
@@ -104,11 +87,13 @@ public class PdfIngestionService {
                 stripper.setStartPage(i + 1);
                 stripper.setEndPage(i + 1);
                 String pageText = stripper.getText(document);
+                boolean fromOcr = false;
 
                 if (pageText.trim().length() < MIN_REAL_TEXT_LENGTH) {
                     // Case 2: no real text layer -> likely a fully scanned page.
                     BufferedImage pageImage = renderer.renderImageWithDPI(i, RENDER_DPI);
                     pageText = tesseract.doOCR(pageImage);
+                    fromOcr = true;
                 } else {
                     // Case 1: real text layer exists -> also OCR any embedded
                     // images on this page (diagrams, screenshots, etc.) and
@@ -119,7 +104,7 @@ public class PdfIngestionService {
                     }
                 }
 
-                pages.add(pageText);
+                pages.add(new ParsedPage(pageText, fromOcr));
             }
         }
 
@@ -152,74 +137,46 @@ public class PdfIngestionService {
     }
 
     // ---------------------------------------------------------------------
-    // Cleaning (runs once, on the whole merged document)
+    // Cleaning
     // ---------------------------------------------------------------------
 
+    /** Used for both the whole-document text and each individual page's text. */
     private String clean(String text) {
-        Set<String> boilerplate = computeBoilerplateLines(List.of(text));
         text = text.replaceAll("-\\n", "");                  // rejoin hyphenated line breaks
         text = text.replaceAll("\\r\\n|\\r", "\n");            // normalize line endings
-        text = removeLines(text, boilerplate);                  // strip boilerplate headers/footers
+        text = removePageNumberFooters(text);                  // strip a leading "Page X of Y" header
         text = text.replaceAll("[ \\t]+", " ");                // collapse repeated spaces/tabs
         text = text.replaceAll("\\n{3,}", "\n\n");             // collapse 3+ blank lines to one
         text = Normalizer.normalize(text, Normalizer.Form.NFKC); // fix stray encoding artifacts
         return text.trim();
     }
 
-    /** Cleaning for one page, given a boilerplate set already computed across ALL pages. */
-    private String cleanSinglePage(String text, Set<String> boilerplate) {
-        text = text.replaceAll("-\\n", "");
-        text = text.replaceAll("\\r\\n|\\r", "\n");
-        text = removeLines(text, boilerplate);
-        text = text.replaceAll("[ \\t]+", " ");
-        text = text.replaceAll("\\n{3,}", "\n\n");
-        text = Normalizer.normalize(text, Normalizer.Form.NFKC);
-        return text.trim();
+    private String removePageNumberFooters(String text) {
+        // replaceFirst, not replaceAll: the pattern is anchored with ^ so it
+        // can only ever match once anyway (at the very start of the text),
+        // but replaceFirst makes that intent explicit.
+        return PAGE_FOOTER_PATTERN.matcher(text).replaceFirst("");
     }
 
-    /**
-     * Finds lines that repeat often enough (across the given page(s)) to be
-     * a header/footer, e.g. "Confidential - Internal Use Only" showing up on
-     * every page. Plain-English steps:
-     *   1. Count how many times each short line appears, across all pages.
-     *   2. Keep only the lines that appeared BOILERPLATE_MIN_REPEATS times
-     *      or more -- those are the ones we'll treat as boilerplate.
-     */
-    private Set<String> computeBoilerplateLines(List<String> pages) {
-        Map<String, Integer> lineCounts = new HashMap<>();
-
-        for (String page : pages) {
-            String[] linesOnThisPage = page.split("\n");
-            for (String line : linesOnThisPage) {
-                String trimmedLine = line.trim();
-                boolean tooLongToBeBoilerplate = trimmedLine.length() >= BOILERPLATE_MAX_LINE_LENGTH;
-                if (trimmedLine.isEmpty() || tooLongToBeBoilerplate) {
-                    continue; // skip blank lines and long lines -- boilerplate is usually short
-                }
-
-                int countSoFar = lineCounts.getOrDefault(trimmedLine, 0);
-                lineCounts.put(trimmedLine, countSoFar + 1);
-            }
+    private boolean looksLikeGarbledText(String text) {
+        String[] words = text.trim().split("\\s+");
+        if (words.length == 0) {
+            return false;
         }
-
-        Set<String> boilerplateLines = new HashSet<>();
-        for (Map.Entry<String, Integer> entry : lineCounts.entrySet()) {
-            String line = entry.getKey();
-            int timesSeen = entry.getValue();
-            if (timesSeen >= BOILERPLATE_MIN_REPEATS) {
-                boilerplateLines.add(line);
-            }
-        }
-        return boilerplateLines;
+        long realWords = Arrays.stream(words)
+                .filter(word -> word.replaceAll("[^A-Za-z]", "").length() >= 3)
+                .count();
+        return (double) realWords / words.length < MIN_REAL_WORD_RATIO;
     }
 
-    private String removeLines(String text, Set<String> boilerplate) {
-        StringBuilder result = new StringBuilder();
-        for (String line : text.split("\n")) {
-            if (!boilerplate.contains(line.trim())) {
-                result.append(line).append("\n");
-            }
+    private boolean looksLikeTableOfContents(String text) {
+        String[] tokens = text.trim().split("\\s+");
+        if (tokens.length == 0) {
+            return false;
         }
-        return result.toString();
+        long numberTokens = Arrays.stream(tokens)
+                .filter(token -> token.matches("\\d+"))
+                .count();
+        return (double) numberTokens / tokens.length > MAX_NUMBER_TOKEN_RATIO;
     }
 }

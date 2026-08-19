@@ -10,44 +10,22 @@ import com.calfus.ragassistant.vectorstore.QdrantClient;
 import com.calfus.ragassistant.vectorstore.QdrantSearchResult;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 
-/**
- * This is the "answer a question" half of the app (uploading/chunking PDFs
- * is DocumentIngestionService's job -- this class only reads what's already
- * been stored).
- *
- * Kept deliberately simple and cheap: exactly ONE OpenAI embedding call and
- * ONE OpenAI chat call per question -- no separate query-rewrite call, no
- * keyword search + merge, no rerank call. An earlier version of this class
- * did all of that (matching a more "textbook" RAG architecture), but it
- * tripled the OpenAI calls (and cost/latency) per question for a small
- * student project where the simple version already works well.
- *
- * Conversation memory is still real, though: earlier turns from the SAME
- * session are loaded from Postgres and included as plain text in the SAME
- * final prompt (not a separate LLM call), so follow-up questions like
- * "what about for contractors?" still get some context.
- *
- * Steps:
- *   1. Ask + Memory -- load earlier turns from this conversation (a DB read,
- *      not an OpenAI call).
- *   2. Embed the question and run ONE vector search in Qdrant, scoped to
- *      this user only.
- *   3. Build one prompt containing the recent conversation + the matched
- *      document excerpts, and ask the chat model for an answer.
- *   4. Return the answer with its sources, and save this turn to history.
- */
+@RequiredArgsConstructor
 @Service
 public class ChatService {
 
-    private static final int TOP_K = 5;                  // how many chunks the vector search fetches
-    private static final int SNIPPET_MAX_LENGTH = 300;    // trimmed source text shown in the UI
+    private static final int TOP_K = 18;
     private static final int MAX_HISTORY_TURNS = 4;       // how many earlier turns are shown to the model
+
+    private static final double RELEVANCE_GAP = 0.15;
+
+    private static final String SMALL_TALK_TAG = "TYPE: SMALL_TALK";
+    private static final String DOCUMENT_TAG = "TYPE: DOCUMENT";
 
     private final EmbeddingModel embeddingModel;
     private final ChatLanguageModel chatModel;
@@ -55,26 +33,17 @@ public class ChatService {
     private final ChatHistoryRepository chatHistoryRepository;
     private final UserRepository userRepository;
 
-    public ChatService(
-            EmbeddingModel embeddingModel,
-            ChatLanguageModel chatModel,
-            QdrantClient qdrantClient,
-            ChatHistoryRepository chatHistoryRepository,
-            UserRepository userRepository) {
-        this.embeddingModel = embeddingModel;
-        this.chatModel = chatModel;
-        this.qdrantClient = qdrantClient;
-        this.chatHistoryRepository = chatHistoryRepository;
-        this.userRepository = userRepository;
-    }
-
     public AskResponse ask(UUID userId, String sessionId, String question) {
 
         // Step 1: Ask + Memory -- load this conversation's earlier turns (just a DB read, no OpenAI call).
         List<ChatHistory> history = loadRecentHistory(sessionId, userId);
 
         // Step 2: embed the question (1st OpenAI call) and run ONE vector search.
-        float[] questionVectorAsArray = embeddingModel.embed(question).content().vector();
+        // normalizeQuestion() only affects what gets embedded/searched -- the
+        // raw "question" (as the user actually typed it) is still what's saved
+        // to history and what the LLM sees in the final prompt below.
+        String normalizedQuestion = normalizeQuestion(question);
+        float[] questionVectorAsArray = embeddingModel.embed(normalizedQuestion).content().vector();
         List<Float> questionVector = toFloatList(questionVectorAsArray);
         List<QdrantSearchResult> matches = qdrantClient.search(questionVector, TOP_K, userId);
 
@@ -85,11 +54,21 @@ public class ChatService {
             return new AskResponse(noDataAnswer, new ArrayList<>());
         }
 
+        // Drop chunks that only made the top-18 to pad it out, not because
+        // they're actually relevant to THIS question (see RELEVANCE_GAP
+        // above). The best match always survives this filter by definition,
+        // so relevantMatches is never empty here.
+        double bestScore = matches.stream().mapToDouble(QdrantSearchResult::score).max().orElse(0);
+        List<QdrantSearchResult> relevantMatches = matches.stream()
+                .filter(match -> match.score() >= bestScore - RELEVANCE_GAP)
+                .toList();
+
         // Step 3: build the context text and the sources list from the matched chunks.
         StringBuilder contextText = new StringBuilder();
         List<SourceSnippet> sources = new ArrayList<>();
+        Set<String> citedPages = new HashSet<>();
 
-        for (QdrantSearchResult match : matches) {
+        for (QdrantSearchResult match : relevantMatches) {
             String filename = String.valueOf(match.payload().get("filename"));
             String fullChunkText = String.valueOf(match.payload().get("text"));
             Integer pageNumber = toPageNumber(match.payload().get("pageNumber"));
@@ -101,8 +80,14 @@ public class ChatService {
                     .append(" (page ").append(pageNumber).append(")\n")
                     .append(fullChunkText);
 
-            String shortChunkText = truncate(fullChunkText, SNIPPET_MAX_LENGTH);
-            sources.add(new SourceSnippet(filename, pageNumber, shortChunkText, match.score()));
+            // The UI only ever shows filename + page number for a source (see
+            // Dashboard.jsx), never this text -- it's kept on SourceSnippet
+            // only in case something needs it later (e.g. a "view excerpt"
+            // feature), so no truncation logic is needed here at all.
+            String citationKey = filename + "|" + pageNumber;
+            if (citedPages.add(citationKey)) {
+                sources.add(new SourceSnippet(filename, pageNumber, fullChunkText, match.score()));
+            }
         }
 
         // Step 4: ONE prompt with both the recent conversation AND the matched
@@ -112,21 +97,51 @@ public class ChatService {
 
         String prompt = """
                 You are a helpful assistant answering questions using ONLY the document excerpts below.
-                If the excerpts don't contain the answer, say you don't know rather than guessing.
+
+                First, decide what kind of message this is:
+                - SMALL_TALK: a greeting, thanks, or casual remark (e.g. "hi", "how are you doing???",
+                  "thanks", "bye") that is NOT actually asking about the documents.
+                - DOCUMENT: a genuine question about the documents.
+
+                Start your reply with exactly one line containing ONLY "TYPE: SMALL_TALK" or
+                "TYPE: DOCUMENT" (nothing else on that line), then a blank line, then your answer.
+
+                If SMALL_TALK: ignore the excerpts below entirely and just reply naturally and
+                warmly in 1-2 short sentences, inviting the user to ask about their documents.
+                Do NOT say "I don't know" to small talk.
+
+                If DOCUMENT: answer using ONLY the excerpts below. If the excerpts don't contain
+                the answer, say you don't know rather than guessing. If different excerpts
+                (especially from different documents) give different or conflicting information,
+                do NOT silently pick one -- say so explicitly and state what each document says,
+                naming each source file. You may refer to a document by name if it reads naturally,
+                but do NOT list or enumerate specific page numbers in your answer -- the app shows
+                the exact pages used in a separate Sources panel, so restating them in your answer
+                risks not matching that list exactly.
+
+                In both cases, write the answer itself as plain text only -- no Markdown syntax
+                at all (no **bold**, no numbered "1." or bulleted "-" lists, no headings). Use
+                plain sentences, and separate distinct points with a line break instead of a list.
                 %s
                 Excerpts:
                 %s
 
                 Question: %s
-
-                Answer clearly, and mention which document(s) the answer came from.
                 """.formatted(historyText, contextText.toString(), question);
 
-        String answer = chatModel.generate(prompt); // 2nd (and last) OpenAI call for this question
+        String rawAnswer = chatModel.generate(prompt); // 2nd (and last) OpenAI call for this question
+
+        // The model's classification (see the tags above) decides whether the
+        // sources panel makes sense to show at all -- for small talk, sources
+        // is forced to an empty list even though matches/contextText above
+        // did technically retrieve chunks (we don't know it's small talk
+        // until this same call comes back, so retrieval still runs first).
+        boolean isSmallTalk = rawAnswer.trim().regionMatches(true, 0, SMALL_TALK_TAG, 0, SMALL_TALK_TAG.length());
+        String answer = stripTypeTag(rawAnswer);
 
         saveTurn(userId, sessionId, question, answer);
 
-        return new AskResponse(answer, sources);
+        return new AskResponse(answer, isSmallTalk ? new ArrayList<>() : sources);
     }
 
     // -------------------------------------------------------------------
@@ -180,11 +195,32 @@ public class ChatService {
     // Small shared helpers
     // -------------------------------------------------------------------
 
-    private String truncate(String text, int maxLength) {
-        if (text.length() <= maxLength) {
-            return text;
+    // Trims stray leading/trailing whitespace, collapses repeated inner spaces,
+    // and lowercases the question before it's turned into a vector. Doesn't
+    // change what the model understands (embedding models already handle case
+    // and typos reasonably well) -- this is just about removing pointless
+    // differences between e.g. "WHAT is the probation period" and "what is
+    // the probation period  " so they embed as closer to the same vector,
+    // instead of the search's top-5 cutoff shuffling around for no real reason.
+    private String normalizeQuestion(String question) {
+        return question.trim().toLowerCase().replaceAll("\\s+", " ");
+    }
+
+    // Removes the leading "TYPE: ..." classification line (see SMALL_TALK_TAG/
+    // DOCUMENT_TAG above) so the user never sees it -- only the actual answer
+    // that follows it. Falls back to returning the raw text untouched if the
+    // model ever forgets to include the tag, so a formatting slip on the
+    // model's end never breaks the chat.
+    private String stripTypeTag(String rawAnswer) {
+        String trimmed = rawAnswer.trim();
+        boolean hasTag = trimmed.regionMatches(true, 0, SMALL_TALK_TAG, 0, SMALL_TALK_TAG.length())
+                || trimmed.regionMatches(true, 0, DOCUMENT_TAG, 0, DOCUMENT_TAG.length());
+        if (!hasTag) {
+            return trimmed;
         }
-        return text.substring(0, maxLength) + "...";
+
+        int newlineIndex = trimmed.indexOf('\n');
+        return newlineIndex == -1 ? trimmed : trimmed.substring(newlineIndex + 1).trim();
     }
 
     // Qdrant sends the pageNumber back to us as JSON, and Java isn't 100%

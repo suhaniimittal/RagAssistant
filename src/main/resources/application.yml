@@ -36,7 +36,7 @@ spring:
 ocr:
   tessdata-path: tessdata
   language: eng
-
+  native-library-path: /opt/homebrew/opt/tesseract/lib
 # JWT - reads from the JWT_SECRET environment variable if one is set (e.g. in
 # a real deployment); otherwise falls back to the placeholder value below so
 # local dev/demo runs work with zero setup. Before any real deployment,

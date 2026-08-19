@@ -28,7 +28,7 @@ public class DocumentController {
             Authentication authentication) {
         UUID userId = (UUID) authentication.getPrincipal();
         var document = ingestionService.ingest(userId, file);
-        return ResponseEntity.ok(DocumentResponse.from(document));  //This converts the internal document/entity into a DTO suitable for the API response.
+        return ResponseEntity.ok(DocumentResponse.from(document));
     }
 
     @GetMapping
@@ -38,5 +38,12 @@ public class DocumentController {
                 .map(DocumentResponse::from)
                 .toList();
         return ResponseEntity.ok(documents);
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> delete(@PathVariable UUID id, Authentication authentication) {
+        UUID userId = (UUID) authentication.getPrincipal();
+        ingestionService.delete(userId, id);
+        return ResponseEntity.noContent().build();
     }
 }

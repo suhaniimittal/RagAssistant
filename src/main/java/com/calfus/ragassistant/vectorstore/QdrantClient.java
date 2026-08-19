@@ -105,7 +105,13 @@ public class QdrantClient {
     /** Vector similarity search, restricted to one user's own points via a payload filter. */
     public List<QdrantSearchResult> search(List<Float> queryVector, int limit, UUID userId) {
         Map<String, Object> filter = Map.of(
-                "must", List.of(Map.of("key", "userId", "match", Map.of("value", userId))));
+                "must", List.of(
+                        Map.of(
+                                "key", "userId",
+                                "match", Map.of("value", userId)
+                        )
+                )
+        );
 
         Map<String, Object> body = Map.of(
                 "vector", queryVector,
